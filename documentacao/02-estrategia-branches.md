@@ -41,7 +41,7 @@ A nova estratégia de branches foi desenhada para automatizar completamente o pr
 |--------|----------|--------|---------|-----------|
 | `develop` | Desenvolvimento | Automático | Push | Não |
 | `homolog` | Homologação | Automático | Push | Não |
-| `master` | Produção | Manual | Push/Tag | Sim |
+| `master` | Produção | **MANUAL** | **Manual** | **OBRIGATÓRIA** |
 
 ## Fluxo de Trabalho Detalhado
 
@@ -100,10 +100,11 @@ homolog:
 ### 3. Branch `master` → Ambiente de Produção
 
 #### Características:
-- **Deploy**: Manual com aprovação
+- **Deploy**: **MANUAL com aprovação obrigatória**
 - **Finalidade**: Ambiente de produção
-- **Aprovação**: Obrigatória
-- **Rollback**: Processo controlado
+- **Aprovação**: **Obrigatória por pessoa responsável**
+- **Rollback**: Processo controlado com aprovação
+- **Segurança**: Máximo nível de proteção
 
 #### Pipeline:
 ```yaml
@@ -114,9 +115,10 @@ master:
     - step: SonarQube
     - step: Security Scan
     - step: Compliance Check
-  - step: Deploy to Production (manual approval required)
-  - step: Smoke Tests
-  - step: Health Check
+  - step: 
+      <<: Deploy to Production
+      trigger: manual  # ⚠️ SEMPRE MANUAL
+      # Requer aprovação manual antes de executar
 ```
 
 #### Casos de Uso:
@@ -144,6 +146,34 @@ Exemplos:
 - **Tags**: Criadas automaticamente no merge para master
 - **Pre-releases**: Para branches homolog (opcionais)
 - **Releases**: Apenas para deployments de produção
+
+## Controles de Segurança para Produção
+
+### Deploy Manual Obrigatório
+- **Nenhum deploy automático** para produção
+- **Sempre requer intervenção humana**
+- **Aprovação explícita** antes da execução
+- **Validação de pré-requisitos** antes do deploy
+
+### Processo de Aprovação
+```
+1. Pipeline executa build + testes + análises
+2. Pipeline pausa aguardando aprovação manual
+3. Responsável valida:
+   ✅ Testes passaram
+   ✅ Quality Gate OK
+   ✅ Security Scan limpo
+   ✅ Change Request aprovado
+   ✅ Janela de deploy apropriada
+4. Aprovação manual para continuar
+5. Deploy executado com monitoramento
+6. Validação pós-deploy obrigatória
+```
+
+### Responsáveis por Aprovação
+- **Tech Lead** do projeto
+- **DevOps Lead** 
+- **Gestor do sistema** (para mudanças críticas)
 
 ## Proteção de Branches
 
@@ -197,7 +227,8 @@ pipelines:
         - step: *compliance-check
       - step:
           <<: *deploy-prod
-          trigger: manual
+          trigger: manual  # ⚠️ OBRIGATÓRIO: Deploy manual para produção
+          # Pessoa responsável deve aprovar manualmente
 ```
 
 ### 2. Branch Permissions

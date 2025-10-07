@@ -233,7 +233,9 @@ pipelines:
         - step: *dependency-check
       - step: *package-nodejs
       - step: *publish-harbor
-      - step: *deploy-prod
+      - step:
+          <<: *deploy-prod
+          trigger: manual
 
   pull-requests:
     '**':

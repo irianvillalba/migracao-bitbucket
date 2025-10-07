@@ -62,7 +62,9 @@ migracao-bitbucket-cloud/
 |--------|----------|-----------|
 | `develop` | Desenvolvimento | Deploy automático para ambiente de desenvolvimento |
 | `homolog` | Homologação | Deploy automático para ambiente de homologação |
-| `master` | Produção | Deploy automático para ambiente de produção |
+| `master` | Produção | **Deploy MANUAL com aprovação obrigatória** |
+
+> ⚠️ **IMPORTANTE**: Deploy para produção é SEMPRE manual e requer aprovação explícita de pessoa responsável.
 
 ## Fases da Migração
 

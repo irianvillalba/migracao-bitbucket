@@ -140,7 +140,9 @@ pipelines:
       - parallel:
         - step: *sonar-scan
         - step: *dependency-check
-      - step: *deploy-prod
+      - step:
+          <<: *deploy-prod
+          trigger: manual
 
   pull-requests:
     '**':

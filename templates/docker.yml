@@ -180,7 +180,9 @@ pipelines:
         - step: *sonar-scan
         - step: *dependency-check
       - step: *push-harbor
-      - step: *deploy-prod
+      - step:
+          <<: *deploy-prod
+          trigger: manual
 
   pull-requests:
     '**':
