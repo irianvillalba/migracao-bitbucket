@@ -111,9 +111,9 @@ homolog:
     - step: Tests
     - step: SonarQube
     - step: Security Scan
-    - step: Performance Tests
+    - step: Dependency Check  # OWASP Security
   - step: Deploy to Homologation (automatic)
-  - step: Integration Tests
+  - step: Lighthouse Audit  # Para aplicações frontend
 ```
 
 #### Casos de Uso:
@@ -139,7 +139,7 @@ master:
     - step: Tests
     - step: SonarQube
     - step: Security Scan
-    - step: Compliance Check
+    - step: Dependency Check  # OWASP Security Check
   - step: 
       <<: Deploy to Production
       trigger: manual  # ⚠️ SEMPRE MANUAL

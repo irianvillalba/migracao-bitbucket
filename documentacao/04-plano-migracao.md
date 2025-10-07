@@ -9,8 +9,10 @@
 - **Melhoria da eficiência** e padronização de processos
 
 ### Escopo
-- **32 projetos** ativos no Bamboo
-- **127 plans** de build/deploy
+- **40+ projetos** ativos no Bamboo (CORRIGIDO)
+- **~200 plans** ativos que serão migrados (CORRIGIDO)
+- **~72 plans** "Never built" que serão descartados (CORRIGIDO)
+- **Total: ~272 plans** identificados na interface
 - **6 ambientes** (3 por aplicação: dev, homolog, prod)
 - **8 tecnologias** diferentes (.NET, Docker, PHP, Node.js, React, Angular, DB, Services)
 
@@ -79,54 +81,40 @@
 **Responsável**: Equipe DevOps + Equipes de desenvolvimento  
 
 #### Lote 1: Projetos .NET (Semana 1)
-**Projetos**: 8 aplicações .NET
+**Projetos**: 6 aplicações .NET principais
 - [ ] MRE Core API
 - [ ] Hefesto Base
 - [ ] RH System
 - [ ] Corporate Portal
 - [ ] Authentication Service
 - [ ] Reporting Engine
-- [ ] Document Manager
-- [ ] Workflow Engine
 
 #### Lote 2: Aplicações Web (Semana 2)
-**Projetos**: 6 aplicações React/Angular
+**Projetos**: 4 aplicações React/Angular
 - [ ] Portal Público
 - [ ] Dashboard Administrativo
-- [ ] Mobile App Web
 - [ ] Intranet
 - [ ] Help Desk
-- [ ] Monitoring Dashboard
 
 #### Lote 3: Aplicações PHP Legadas (Semana 3)
-**Projetos**: 5 sistemas PHP
-- [ ] Sistema Legado A
-- [ ] Sistema Legado B
+**Projetos**: 3 sistemas PHP
+- [ ] Sistema Legado Principal
 - [ ] Website Institucional
 - [ ] CMS Interno
-- [ ] Sistema de Apoio
 
 #### Lote 4: Aplicações Node.js (Semana 4)
-**Projetos**: 4 aplicações Node.js
+**Projetos**: 2 aplicações Node.js
 - [ ] API Gateway
-- [ ] Microservice A
-- [ ] Microservice B
-- [ ] ETL Service
+- [ ] Microservice Principal
 
 #### Lote 5: Aplicações Docker (Semana 5)
-**Projetos**: 6 aplicações containerizadas
-- [ ] Container App A
-- [ ] Container App B
-- [ ] Kubernetes Services
+**Projetos**: 2 aplicações containerizadas
+- [ ] Container App Principal
 - [ ] Monitoring Stack
-- [ ] Log Aggregation
-- [ ] Cache Service
 
 #### Lote 6: Bancos de Dados e Utilitários (Semana 6)
-**Projetos**: 3 projetos especiais
+**Projetos**: 1 projeto especial
 - [ ] Database Migrations
-- [ ] Backup Scripts
-- [ ] Monitoring Scripts
 
 ### Fase 4: Validação e Estabilização
 **Duração**: 1 semana  
