@@ -21,7 +21,8 @@ migracao-bitbucket-cloud/
 │   ├── 02-estrategia-branches.md      # Estratégia de branches e deploy
 │   ├── 03-configuracao-agentes.md     # Setup de runners on-premise
 │   ├── 04-plano-migracao.md           # Plano detalhado de migração
-│   └── 05-integracao-ferramentas.md   # Integração com SonarQube, etc.
+│   ├── 05-integracao-ferramentas.md   # Integração com SonarQube, etc.
+│   └── 06-promocao-artefatos.md       # Promoção entre ambientes
 ├── templates/                          # Templates de pipeline
 │   ├── dotnet-msbuild.yml             # Template para .NET/MSBuild
 │   ├── docker.yml                     # Template para aplicações Docker

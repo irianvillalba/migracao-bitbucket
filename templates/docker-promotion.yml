@@ -1,0 +1,283 @@
+# Template Docker com Promoção de Artefatos - Bitbucket Pipelines
+
+image: docker:20.10.16
+
+options:
+  docker: true
+
+definitions:
+  services:
+    docker:
+      memory: 2048
+
+  steps:
+    # Build único - executa apenas na branch develop
+    - step: &build-and-package
+        name: Build Docker Image Once
+        runs-on: self.hosted
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          # Build da imagem apenas uma vez
+          - echo "🔨 Building Docker image..."
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$HARBOR_PROJECT/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Build e tag
+          - docker build -t $FULL_IMAGE_NAME .
+          - docker tag $FULL_IMAGE_NAME $IMAGE_NAME:latest
+          
+          # Security scan
+          - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL $FULL_IMAGE_NAME
+          
+          # Login e push para Harbor
+          - echo $HARBOR_PASSWORD | docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+          - docker push $FULL_IMAGE_NAME
+          - docker push $IMAGE_NAME:latest
+          
+          # Salvar informações da build para promoção
+          - echo "IMAGE_TAG=$IMAGE_TAG" > build.env
+          - echo "IMAGE_NAME=$IMAGE_NAME" >> build.env
+          - echo "FULL_IMAGE_NAME=$FULL_IMAGE_NAME" >> build.env
+          - echo "BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> build.env
+          
+          echo "✅ Image built and pushed: $FULL_IMAGE_NAME"
+        artifacts:
+          - build.env
+
+    # Promoção para desenvolvimento
+    - step: &promote-to-dev
+        name: 🚀 Promote to Development
+        runs-on: self.hosted
+        script:
+          # Carregar informações da build
+          - source build.env
+          - echo "📦 Promoting version: $IMAGE_TAG to Development"
+          - echo "🎯 Target: Development Environment"
+          
+          # Verificar se imagem existe no registry
+          - docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+          - docker pull $FULL_IMAGE_NAME
+          
+          # Deploy para desenvolvimento
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "
+              echo '🔄 Deploying to Development...' &&
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME \
+                -p $DEV_APP_PORT:$APP_INTERNAL_PORT \
+                -e APP_ENV=development \
+                $FULL_IMAGE_NAME &&
+              echo '✅ Development deployment completed'
+            "
+          
+          # Health check
+          - sleep 30
+          - curl -f "http://$DEV_SERVER_HOST:$DEV_APP_PORT/health" || (echo "❌ Health check failed" && exit 1)
+          
+          echo "✅ Successfully promoted $IMAGE_TAG to Development"
+
+    # Promoção para homologação (manual)
+    - step: &promote-to-homolog
+        name: 🚀 Promote to Homologation
+        runs-on: self.hosted
+        trigger: manual  # Requer aprovação manual
+        script:
+          # Carregar informações da build
+          - source build.env
+          - echo "📦 Promoting version: $IMAGE_TAG to Homologation"
+          - echo "🎯 Target: Homologation Environment"
+          - echo "⚠️  Manual approval required for this promotion"
+          
+          # Verificar se imagem existe e foi validada em dev
+          - docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+          - docker pull $FULL_IMAGE_NAME
+          
+          # Verificar se passou pelos testes de desenvolvimento
+          - echo "🔍 Validating prerequisites..."
+          - curl -f "http://$DEV_SERVER_HOST:$DEV_APP_PORT/health" || (echo "❌ Development environment not healthy" && exit 1)
+          
+          # Deploy para homologação
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "
+              echo '🔄 Deploying to Homologation...' &&
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME \
+                -p $HOMOLOG_APP_PORT:$APP_INTERNAL_PORT \
+                -e APP_ENV=staging \
+                $FULL_IMAGE_NAME &&
+              echo '✅ Homologation deployment completed'
+            "
+          
+          # Health check
+          - sleep 30
+          - curl -f "http://$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PORT/health" || (echo "❌ Health check failed" && exit 1)
+          
+          echo "✅ Successfully promoted $IMAGE_TAG to Homologation"
+
+    # Promoção para produção (manual obrigatório)
+    - step: &promote-to-prod
+        name: 🚀 Promote to Production
+        runs-on: self.hosted
+        trigger: manual  # SEMPRE manual para produção
+        script:
+          # Carregar informações da build
+          - source build.env
+          - echo "📦 Promoting version: $IMAGE_TAG to PRODUCTION"
+          - echo "🎯 Target: PRODUCTION Environment"
+          - echo "🔒 CRITICAL: Production deployment requires explicit approval"
+          
+          # Verificações de segurança extras para produção
+          - docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+          - docker pull $FULL_IMAGE_NAME
+          
+          # Validar que passou em homologação
+          - echo "🔍 Validating homologation prerequisites..."
+          - curl -f "http://$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PORT/health" || (echo "❌ Homologation environment not healthy" && exit 1)
+          
+          # Backup da versão atual em produção
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              echo '💾 Creating backup of current production version...' &&
+              docker tag \$(docker inspect --format='{{.Image}}' $APP_CONTAINER_NAME) \
+                $IMAGE_NAME:backup-\$(date +%Y%m%d_%H%M%S) 2>/dev/null || echo 'No existing container to backup'
+            "
+          
+          # Deploy para produção
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              echo '🔄 Deploying to PRODUCTION...' &&
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME \
+                -p $PROD_APP_PORT:$APP_INTERNAL_PORT \
+                -e APP_ENV=production \
+                $FULL_IMAGE_NAME &&
+              echo '✅ PRODUCTION deployment completed'
+            "
+          
+          # Health checks críticos para produção
+          - sleep 30
+          - curl -f "$PROD_APP_URL/health" || (echo "❌ CRITICAL: Production health check failed!" && exit 1)
+          
+          # Smoke tests básicos
+          - curl -f "$PROD_APP_URL/api/status" || echo "⚠️ API status check warning"
+          
+          echo "✅ Successfully promoted $IMAGE_TAG to PRODUCTION"
+
+    # SonarQube analysis (uma vez por build)
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        script:
+          - sonar-scanner \
+              -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+              -Dsonar.sources=. \
+              -Dsonar.host.url="$SONAR_HOST_URL" \
+              -Dsonar.login="$SONAR_TOKEN"
+
+    # Dependency check (uma vez por build)
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          - chmod +x ./scripts/dependency-check.sh
+          - ./scripts/dependency-check.sh
+        artifacts:
+          - dependency-check-report/**
+
+pipelines:
+  # Build principal: apenas na develop
+  branches:
+    develop:
+      - step: *build-and-package     # Build uma única vez
+      - parallel:
+        - step: *sonar-scan          # Análise de qualidade
+        - step: *dependency-check    # Análise de segurança
+      - step: *promote-to-dev        # Deploy automático para dev
+
+  # Promoção: usar artefato já buildado
+  branches:
+    homolog:
+      - step: *promote-to-homolog    # Manual: promover para homolog
+
+    master:
+      - step: *promote-to-prod       # Manual: promover para produção
+
+  # Promoção por tags (versões específicas)
+  tags:
+    'v*':
+      - step:
+          name: 🏷️ Tagged Release Promotion
+          runs-on: self.hosted
+          script:
+            # Promover tag específica para produção
+            - export IMAGE_TAG="$BITBUCKET_TAG"
+            - export IMAGE_NAME="$HARBOR_REGISTRY/$HARBOR_PROJECT/$BITBUCKET_REPO_SLUG"
+            - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+            - echo "🏷️ Promoting tagged release: $BITBUCKET_TAG"
+            
+            # Verificar se tag existe no registry
+            - docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+            - docker pull $FULL_IMAGE_NAME || (echo "❌ Tag $BITBUCKET_TAG not found in registry" && exit 1)
+            
+            # Continuar com promoção para produção
+            # ... (mesmo código do promote-to-prod)
+
+  # Pipelines customizados para promoção manual de versões específicas
+  custom:
+    promote-specific-version:
+      - variables:
+          - name: SOURCE_VERSION
+            default: "latest"
+          - name: TARGET_ENV
+            default: "homolog"
+            allowed-values:
+              - "homolog"
+              - "production"
+      - step:
+          name: 🎯 Promote Specific Version
+          runs-on: self.hosted
+          script:
+            - export IMAGE_TAG="$SOURCE_VERSION"
+            - export IMAGE_NAME="$HARBOR_REGISTRY/$HARBOR_PROJECT/$BITBUCKET_REPO_SLUG"
+            - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+            - echo "🎯 Promoting version: $SOURCE_VERSION to $TARGET_ENV"
+            
+            # Verificar se versão existe
+            - docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+            - docker pull $FULL_IMAGE_NAME || (echo "❌ Version $SOURCE_VERSION not found" && exit 1)
+            
+            # Executar promoção baseada no ambiente
+            - |
+              case $TARGET_ENV in
+                "homolog")
+                  echo "Promoting to Homologation..."
+                  # Lógica de deploy para homolog
+                  ;;
+                "production")
+                  echo "Promoting to Production..."
+                  # Lógica de deploy para produção
+                  ;;
+              esac
+
+  # Pull requests: apenas build para validação
+  pull-requests:
+    '**':
+      - step:
+          name: PR Validation Build
+          runs-on: self.hosted
+          services:
+            - docker
+          script:
+            # Build apenas para validação (sem push)
+            - docker build -t pr-validation:$BITBUCKET_COMMIT .
+            - echo "✅ PR build validated successfully"

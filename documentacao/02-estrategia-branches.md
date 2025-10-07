@@ -35,6 +35,31 @@ A nova estratégia de branches foi desenhada para automatizar completamente o pr
                                                   └─────────────────┘
 ```
 
+## Estratégia de Promoção de Artefatos
+
+### Build uma vez, Deploy múltiplas vezes
+```
+develop (build) ──▶ Artefato 0.0.1 ──▶ Deploy Dev (automático)
+                         │
+homolog (promote) ──────┘ ├─────────▶ Deploy Homolog (manual)
+                               │
+master (promote) ─────────────┘ └─▶ Deploy Prod (manual)
+```
+
+### Vantagens da Promoção
+- ✅ **Mesmo artefato** em todos os ambientes
+- ✅ **Deploy mais rápido** (sem recompilação)
+- ✅ **Reduz riscos** de diferenças entre ambientes
+- ✅ **Rastreabilidade** completa da versão
+
+### Mapeamento Branch → Ação
+
+| Branch | Ação | Artefato | Descrição |
+|--------|------|----------|-----------|
+| `develop` | **Build + Deploy** | Cria 0.0.1 | Build único + deploy dev |
+| `homolog` | **Promote** | Usa 0.0.1 | Promove artefato existente |
+| `master` | **Promote** | Usa 0.0.1 | Promove para produção |
+
 ## Mapeamento Branch → Ambiente
 
 | Branch | Ambiente | Deploy | Trigger | Aprovação |
