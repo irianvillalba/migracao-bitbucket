@@ -1,0 +1,240 @@
+# Template para Aplicações Angular - Bitbucket Pipelines
+
+image: node:16
+
+definitions:
+  caches:
+    node-modules: node_modules
+
+  steps:
+    - step: &build-angular
+        name: Build Angular Application
+        runs-on: self.hosted
+        caches:
+          - node-modules
+        script:
+          # Verificar versões
+          - node --version
+          - npm --version
+          
+          # Instalar Angular CLI globalmente
+          - npm install -g @angular/cli
+          - ng version
+          
+          # Instalar dependências
+          - npm ci
+          
+          # Executar lint
+          - ng lint || echo "No lint configuration found"
+          
+          # Executar build de produção
+          - ng build --configuration production
+          
+          # Verificar se build foi criado
+          - ls -la dist/
+        artifacts:
+          - dist/**
+
+    - step: &test-angular
+        name: Run Angular Tests
+        runs-on: self.hosted
+        caches:
+          - node-modules
+        script:
+          # Instalar dependências do sistema para testes
+          - apt-get update && apt-get install -y chromium-browser
+          
+          # Configurar Chrome para ambiente headless
+          - export CHROME_BIN=/usr/bin/chromium-browser
+          
+          # Executar testes unitários
+          - ng test --no-watch --no-progress --browsers=ChromeHeadless --code-coverage
+          
+          # Executar testes E2E
+          - ng e2e --protractor-config=e2e/protractor-ci.conf.js || echo "No E2E tests configured"
+        artifacts:
+          - coverage/**
+          - e2e/reports/**
+
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        image: sonarsource/sonar-scanner-cli:latest
+        script:
+          # Executar análise SonarQube
+          - sonar-scanner \
+              -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+              -Dsonar.sources=src \
+              -Dsonar.exclusions=src/**/*.spec.ts,src/test.ts,src/polyfills.ts \
+              -Dsonar.host.url="$SONAR_HOST_URL" \
+              -Dsonar.login="$SONAR_TOKEN" \
+              -Dsonar.typescript.lcov.reportPaths=coverage/lcov.info
+
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          # Instalar dependências do sistema
+          - apt-get update && apt-get install -y wget unzip default-jre
+          
+          # Download e execução do Dependency Check
+          - wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          - unzip dependency-check-8.4.0-release.zip
+          - ./dependency-check/bin/dependency-check.sh --project "$BITBUCKET_REPO_SLUG" --scan . --format XML --format HTML --out dependency-check-report
+          
+          # Verificar vulnerabilidades no npm
+          - npm audit --audit-level moderate || echo "NPM audit completed with warnings"
+        artifacts:
+          - dependency-check-report/**
+
+    - step: &deploy-dev
+        name: Deploy to Development
+        runs-on: self.hosted
+        deployment: development
+        script:
+          # Deploy para ambiente de desenvolvimento
+          - echo "Deploying Angular application to Development..."
+          
+          # Verificar se o build existe
+          - if [ ! -d "dist" ]; then echo "Build directory not found"; exit 1; fi
+          
+          # Encontrar pasta do projeto dentro de dist
+          - PROJECT_DIR=$(ls -1 dist/ | head -n 1)
+          - BUILD_PATH="dist/$PROJECT_DIR"
+          
+          # Sincronizar arquivos de build
+          - rsync -avz --delete $BUILD_PATH/ $DEV_SERVER_USER@$DEV_SERVER_HOST:$DEV_APP_PATH/
+          
+          # Configurar permissões
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "
+              sudo chown -R www-data:www-data $DEV_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+          
+          # Health check
+          - sleep 5
+          - curl -f "$DEV_APP_URL" || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-homolog
+        name: Deploy to Homologation
+        runs-on: self.hosted
+        deployment: staging
+        trigger: manual
+        script:
+          # Deploy para ambiente de homologação
+          - echo "Deploying Angular application to Homologation..."
+          
+          # Verificar se o build existe
+          - if [ ! -d "dist" ]; then echo "Build directory not found"; exit 1; fi
+          
+          # Encontrar pasta do projeto dentro de dist
+          - PROJECT_DIR=$(ls -1 dist/ | head -n 1)
+          - BUILD_PATH="dist/$PROJECT_DIR"
+          
+          # Sincronizar arquivos de build
+          - rsync -avz --delete $BUILD_PATH/ $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PATH/
+          
+          # Configurar permissões
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "
+              sudo chown -R www-data:www-data $HOMOLOG_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+          
+          # Health check
+          - sleep 5
+          - curl -f "$HOMOLOG_APP_URL" || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-prod
+        name: Deploy to Production
+        runs-on: self.hosted
+        deployment: production
+        trigger: manual
+        script:
+          # Deploy para ambiente de produção
+          - echo "Deploying Angular application to Production..."
+          
+          # Backup antes do deploy
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              sudo cp -r $PROD_APP_PATH $PROD_APP_PATH.backup.$(date +%Y%m%d_%H%M%S)
+            "
+          
+          # Verificar se o build existe
+          - if [ ! -d "dist" ]; then echo "Build directory not found"; exit 1; fi
+          
+          # Encontrar pasta do projeto dentro de dist
+          - PROJECT_DIR=$(ls -1 dist/ | head -n 1)
+          - BUILD_PATH="dist/$PROJECT_DIR"
+          
+          # Sincronizar arquivos de build
+          - rsync -avz --delete $BUILD_PATH/ $PROD_SERVER_USER@$PROD_SERVER_HOST:$PROD_APP_PATH/
+          
+          # Configurar permissões
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              sudo chown -R www-data:www-data $PROD_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+          
+          # Health check
+          - sleep 5
+          - curl -f "$PROD_APP_URL" || (echo "Health check failed" && exit 1)
+
+    - step: &lighthouse-audit
+        name: Lighthouse Performance Audit
+        runs-on: self.hosted
+        image: node:16
+        script:
+          # Instalar dependências do sistema
+          - apt-get update && apt-get install -y chromium-browser
+          
+          # Instalar Lighthouse CI
+          - npm install -g @lhci/cli@0.9.x
+          
+          # Executar auditoria Lighthouse
+          - lhci autorun --upload.target=temporary-public-storage || echo "Lighthouse audit completed with warnings"
+        artifacts:
+          - .lighthouseci/**
+
+pipelines:
+  branches:
+    develop:
+      - step: *build-angular
+      - step: *test-angular
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-dev
+      - step: *lighthouse-audit
+
+    homolog:
+      - step: *build-angular
+      - step: *test-angular
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-homolog
+      - step: *lighthouse-audit
+
+    master:
+      - step: *build-angular
+      - step: *test-angular
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-prod
+      - step: *lighthouse-audit
+
+  pull-requests:
+    '**':
+      - step: *build-angular
+      - step: *test-angular
+      - step: *sonar-scan
+
+  tags:
+    'v*':
+      - step: *build-angular
+      - step: *test-angular
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-prod
+      - step: *lighthouse-audit

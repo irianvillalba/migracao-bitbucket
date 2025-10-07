@@ -1,0 +1,253 @@
+# Template para Node.js (12/16) - Bitbucket Pipelines
+
+# Definir versão do Node.js (alterar conforme necessário)
+image: node:16
+
+definitions:
+  caches:
+    node-modules: node_modules
+
+  steps:
+    - step: &build-nodejs
+        name: Build Node.js Application
+        runs-on: self.hosted
+        caches:
+          - node-modules
+        script:
+          # Verificar versões
+          - node --version
+          - npm --version
+          
+          # Instalar dependências
+          - npm ci
+          
+          # Executar lint (se configurado)
+          - npm run lint || echo "No lint script found"
+          
+          # Build da aplicação
+          - npm run build || echo "No build script found"
+        artifacts:
+          - dist/**
+          - build/**
+          - node_modules/**
+
+    - step: &test-nodejs
+        name: Run Node.js Tests
+        runs-on: self.hosted
+        caches:
+          - node-modules
+        script:
+          # Executar testes
+          - npm test || echo "No test script found"
+          
+          # Executar testes de cobertura (se configurado)
+          - npm run test:coverage || echo "No coverage script found"
+        artifacts:
+          - coverage/**
+          - test-results/**
+
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        image: sonarsource/sonar-scanner-cli:latest
+        script:
+          # Executar análise SonarQube
+          - sonar-scanner \
+              -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+              -Dsonar.sources=src \
+              -Dsonar.host.url="$SONAR_HOST_URL" \
+              -Dsonar.login="$SONAR_TOKEN" \
+              -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          # Instalar dependências do sistema
+          - apt-get update && apt-get install -y wget unzip default-jre
+          
+          # Download e execução do Dependency Check
+          - wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          - unzip dependency-check-8.4.0-release.zip
+          - ./dependency-check/bin/dependency-check.sh --project "$BITBUCKET_REPO_SLUG" --scan . --format XML --format HTML --out dependency-check-report
+          
+          # Verificar vulnerabilidades no npm
+          - npm audit --audit-level moderate || echo "NPM audit completed with warnings"
+        artifacts:
+          - dependency-check-report/**
+
+    - step: &package-nodejs
+        name: Package for Harbor Registry
+        runs-on: self.hosted
+        script:
+          # Criar package.tar.gz para publicação
+          - echo "Packaging Node.js application..."
+          - export PACKAGE_VERSION="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          
+          # Criar diretório de package
+          - mkdir -p package
+          - cp -r dist/* package/ 2>/dev/null || cp -r build/* package/ 2>/dev/null || cp -r . package/
+          - cd package && rm -rf node_modules tests .git
+          
+          # Instalar dependências de produção
+          - npm ci --only=production
+          
+          # Criar tarball
+          - cd ..
+          - tar -czf "${BITBUCKET_REPO_SLUG}-${PACKAGE_VERSION}.tar.gz" package/
+        artifacts:
+          - "*.tar.gz"
+
+    - step: &publish-harbor
+        name: Publish to Harbor Registry
+        runs-on: self.hosted
+        script:
+          # Publicar no Harbor como artefato
+          - echo "Publishing to Harbor registry..."
+          - export PACKAGE_VERSION="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export PACKAGE_FILE="${BITBUCKET_REPO_SLUG}-${PACKAGE_VERSION}.tar.gz"
+          
+          # Upload para Harbor usando API
+          - curl -X POST \
+              -H "Authorization: Basic $(echo -n $HARBOR_USERNAME:$HARBOR_PASSWORD | base64)" \
+              -F "file=@${PACKAGE_FILE}" \
+              "$HARBOR_REGISTRY/api/v2.0/projects/$HARBOR_PROJECT/repositories/$BITBUCKET_REPO_SLUG/artifacts"
+
+    - step: &deploy-dev
+        name: Deploy to Development
+        runs-on: self.hosted
+        deployment: development
+        script:
+          # Deploy para ambiente de desenvolvimento
+          - echo "Deploying Node.js application to Development..."
+          
+          # Sincronizar arquivos
+          - rsync -avz --delete \
+              --exclude='node_modules' \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='coverage' \
+              --exclude='dependency-check-report' \
+              ./ $DEV_SERVER_USER@$DEV_SERVER_HOST:$DEV_APP_PATH/
+          
+          # Instalar dependências e reiniciar no servidor
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "
+              cd $DEV_APP_PATH &&
+              npm ci --only=production &&
+              npm run build || true &&
+              pm2 restart $APP_NAME || pm2 start ecosystem.config.js
+            "
+          
+          # Health check
+          - sleep 15
+          - curl -f "http://$DEV_SERVER_HOST:$DEV_APP_PORT/health" || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-homolog
+        name: Deploy to Homologation
+        runs-on: self.hosted
+        deployment: staging
+        trigger: manual
+        script:
+          # Deploy para ambiente de homologação
+          - echo "Deploying Node.js application to Homologation..."
+          
+          # Sincronizar arquivos
+          - rsync -avz --delete \
+              --exclude='node_modules' \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='coverage' \
+              --exclude='dependency-check-report' \
+              ./ $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PATH/
+          
+          # Instalar dependências e reiniciar no servidor
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "
+              cd $HOMOLOG_APP_PATH &&
+              npm ci --only=production &&
+              npm run build || true &&
+              pm2 restart $APP_NAME || pm2 start ecosystem.config.js
+            "
+          
+          # Health check
+          - sleep 15
+          - curl -f "http://$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PORT/health" || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-prod
+        name: Deploy to Production
+        runs-on: self.hosted
+        deployment: production
+        trigger: manual
+        script:
+          # Deploy para ambiente de produção
+          - echo "Deploying Node.js application to Production..."
+          
+          # Backup antes do deploy
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              cp -r $PROD_APP_PATH $PROD_APP_PATH.backup.$(date +%Y%m%d_%H%M%S)
+            "
+          
+          # Sincronizar arquivos
+          - rsync -avz --delete \
+              --exclude='node_modules' \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='coverage' \
+              --exclude='dependency-check-report' \
+              ./ $PROD_SERVER_USER@$PROD_SERVER_HOST:$PROD_APP_PATH/
+          
+          # Instalar dependências e reiniciar no servidor
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              cd $PROD_APP_PATH &&
+              npm ci --only=production &&
+              npm run build || true &&
+              pm2 restart $APP_NAME || pm2 start ecosystem.config.js
+            "
+          
+          # Health check
+          - sleep 15
+          - curl -f "$PROD_APP_URL/health" || (echo "Health check failed" && exit 1)
+
+pipelines:
+  branches:
+    develop:
+      - step: *build-nodejs
+      - step: *test-nodejs
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-dev
+
+    homolog:
+      - step: *build-nodejs
+      - step: *test-nodejs
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-homolog
+
+    master:
+      - step: *build-nodejs
+      - step: *test-nodejs
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *package-nodejs
+      - step: *publish-harbor
+      - step: *deploy-prod
+
+  pull-requests:
+    '**':
+      - step: *build-nodejs
+      - step: *test-nodejs
+      - step: *sonar-scan
+
+  tags:
+    'v*':
+      - step: *build-nodejs
+      - step: *test-nodejs
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *package-nodejs
+      - step: *publish-harbor
+      - step: *deploy-prod

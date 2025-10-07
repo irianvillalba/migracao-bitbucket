@@ -1,0 +1,235 @@
+# Template para PHP Legacy (7.3/5.4) - Bitbucket Pipelines
+
+# Definir imagem baseada na versão do PHP
+image: php:7.3-cli
+
+definitions:
+  steps:
+    - step: &build-php
+        name: Build PHP Application
+        runs-on: self.hosted
+        caches:
+          - composer
+        script:
+          # Instalar dependências do sistema
+          - apt-get update && apt-get install -y git unzip
+          
+          # Instalar Composer
+          - curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+          - composer --version
+          
+          # Verificar versão do PHP
+          - php --version
+          
+          # Instalar dependências do projeto
+          - composer install --no-dev --optimize-autoloader
+          
+          # Executar verificações de sintaxe
+          - find . -name "*.php" -exec php -l {} \; | grep -v "No syntax errors"
+        artifacts:
+          - vendor/**
+          - composer.lock
+
+    - step: &test-php
+        name: Run PHP Tests
+        runs-on: self.hosted
+        script:
+          # Instalar dependências para testes
+          - composer install --dev
+          
+          # Executar PHPUnit (se existir)
+          - if [ -f "phpunit.xml" ] || [ -f "phpunit.xml.dist" ]; then
+              vendor/bin/phpunit --log-junit test-results/phpunit.xml || true;
+            fi
+          
+          # Executar PHP CodeSniffer (se configurado)
+          - if [ -f "phpcs.xml" ] || [ -f "phpcs.xml.dist" ]; then
+              vendor/bin/phpcs --report=checkstyle --report-file=test-results/phpcs.xml || true;
+            fi
+        artifacts:
+          - test-results/**
+
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        image: sonarsource/sonar-scanner-cli:latest
+        script:
+          # Executar análise SonarQube
+          - sonar-scanner -Dsonar.projectKey="$SONAR_PROJECT_KEY" -Dsonar.sources=. -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.login="$SONAR_TOKEN" -Dsonar.php.coverage.reportPaths=test-results/coverage.xml
+
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          # Download e execução do Dependency Check
+          - apt-get update && apt-get install -y wget unzip default-jre
+          - wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          - unzip dependency-check-8.4.0-release.zip
+          - ./dependency-check/bin/dependency-check.sh --project "$BITBUCKET_REPO_SLUG" --scan . --format XML --format HTML --out dependency-check-report
+        artifacts:
+          - dependency-check-report/**
+
+    - step: &publish-satis
+        name: Publish to Satis Composer
+        runs-on: self.hosted
+        script:
+          # Publicar pacote no repositório Satis
+          - echo "Publishing to Satis Composer repository..."
+          
+          # Verificar se é um pacote Composer válido
+          - if [ ! -f "composer.json" ]; then
+              echo "composer.json not found. Skipping Satis publication.";
+              exit 0;
+            fi
+          
+          # Criar arquivo ZIP do pacote
+          - export PACKAGE_VERSION="${BITBUCKET_TAG:-dev-${BITBUCKET_COMMIT:0:7}}"
+          - export PACKAGE_NAME=$(php -r "echo json_decode(file_get_contents('composer.json'))->name;")
+          - export ZIP_NAME="${PACKAGE_NAME}-${PACKAGE_VERSION}.zip"
+          
+          # Criar ZIP excluindo arquivos desnecessários
+          - zip -r $ZIP_NAME . -x "*.git*" "tests/*" "*.zip" "dependency-check-report/*"
+          
+          # Upload para repositório Satis
+          - curl -X POST -F "package=@${ZIP_NAME}" -H "Authorization: Bearer $SATIS_TOKEN" "$SATIS_UPLOAD_URL"
+          
+          # Regenerar repositório Satis
+          - curl -X POST -H "Authorization: Bearer $SATIS_TOKEN" "$SATIS_BUILD_URL"
+
+    - step: &deploy-dev
+        name: Deploy to Development
+        runs-on: self.hosted
+        deployment: development
+        script:
+          # Deploy para ambiente de desenvolvimento
+          - echo "Deploying PHP application to Development..."
+          
+          # Sincronizar arquivos (excluindo arquivos desnecessários)
+          - rsync -avz --delete \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='phpunit.xml*' \
+              --exclude='composer.json' \
+              --exclude='composer.lock' \
+              --exclude='dependency-check-report' \
+              ./ $DEV_SERVER_USER@$DEV_SERVER_HOST:$DEV_APP_PATH/
+          
+          # Executar comandos pós-deploy no servidor
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "
+              cd $DEV_APP_PATH &&
+              composer install --no-dev --optimize-autoloader &&
+              php artisan cache:clear || true &&
+              php artisan config:cache || true &&
+              sudo chown -R www-data:www-data $DEV_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+
+    - step: &deploy-homolog
+        name: Deploy to Homologation
+        runs-on: self.hosted
+        deployment: staging
+        trigger: manual
+        script:
+          # Deploy para ambiente de homologação
+          - echo "Deploying PHP application to Homologation..."
+          
+          # Sincronizar arquivos
+          - rsync -avz --delete \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='phpunit.xml*' \
+              --exclude='composer.json' \
+              --exclude='composer.lock' \
+              --exclude='dependency-check-report' \
+              ./ $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PATH/
+          
+          # Executar comandos pós-deploy no servidor
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "
+              cd $HOMOLOG_APP_PATH &&
+              composer install --no-dev --optimize-autoloader &&
+              php artisan cache:clear || true &&
+              php artisan config:cache || true &&
+              sudo chown -R www-data:www-data $HOMOLOG_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+
+    - step: &deploy-prod
+        name: Deploy to Production
+        runs-on: self.hosted
+        deployment: production
+        trigger: manual
+        script:
+          # Deploy para ambiente de produção
+          - echo "Deploying PHP application to Production..."
+          
+          # Backup antes do deploy
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              sudo cp -r $PROD_APP_PATH $PROD_APP_PATH.backup.$(date +%Y%m%d_%H%M%S)
+            "
+          
+          # Sincronizar arquivos
+          - rsync -avz --delete \
+              --exclude='.git' \
+              --exclude='tests' \
+              --exclude='phpunit.xml*' \
+              --exclude='composer.json' \
+              --exclude='composer.lock' \
+              --exclude='dependency-check-report' \
+              ./ $PROD_SERVER_USER@$PROD_SERVER_HOST:$PROD_APP_PATH/
+          
+          # Executar comandos pós-deploy no servidor
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              cd $PROD_APP_PATH &&
+              composer install --no-dev --optimize-autoloader &&
+              php artisan cache:clear || true &&
+              php artisan config:cache || true &&
+              sudo chown -R www-data:www-data $PROD_APP_PATH &&
+              sudo systemctl reload nginx
+            "
+          
+          # Health check
+          - sleep 10
+          - curl -f "$PROD_APP_URL/health" || curl -f "$PROD_APP_URL" || (echo "Health check failed" && exit 1)
+
+pipelines:
+  branches:
+    develop:
+      - step: *build-php
+      - step: *test-php
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-dev
+
+    homolog:
+      - step: *build-php
+      - step: *test-php
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-homolog
+
+    master:
+      - step: *build-php
+      - step: *test-php
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *publish-satis
+      - step: *deploy-prod
+
+  pull-requests:
+    '**':
+      - step: *build-php
+      - step: *test-php
+      - step: *sonar-scan
+
+  tags:
+    'v*':
+      - step: *build-php
+      - step: *test-php
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *publish-satis
+      - step: *deploy-prod

@@ -1,0 +1,156 @@
+# Template para .NET/MSBuild - Bitbucket Pipelines
+
+image: mcr.microsoft.com/dotnet/sdk:6.0
+
+definitions:
+  steps:
+    - step: &build-dotnet
+        name: Build .NET Application
+        runs-on: self.hosted
+        caches:
+          - dotnetcore
+        script:
+          # Configurar ambiente
+          - echo "Building .NET application..."
+          - dotnet --version
+          
+          # Restore dependencies
+          - dotnet restore
+          
+          # Build da aplicação
+          - dotnet build --configuration Release --no-restore
+          
+          # Executar testes unitários
+          - dotnet test --configuration Release --no-build --verbosity normal --logger trx --results-directory TestResults/
+          
+          # Publicar aplicação
+          - dotnet publish --configuration Release --no-build --output ./publish
+        artifacts:
+          - publish/**
+          - TestResults/**
+
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        script:
+          # Instalar SonarScanner
+          - dotnet tool install --global dotnet-sonarscanner
+          - export PATH="$PATH:/root/.dotnet/tools"
+          
+          # Executar análise SonarQube
+          - dotnet sonarscanner begin /k:"$SONAR_PROJECT_KEY" /d:sonar.host.url="$SONAR_HOST_URL" /d:sonar.login="$SONAR_TOKEN"
+          - dotnet build --configuration Release
+          - dotnet sonarscanner end /d:sonar.login="$SONAR_TOKEN"
+
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          # Download e execução do Dependency Check
+          - wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          - unzip dependency-check-8.4.0-release.zip
+          - ./dependency-check/bin/dependency-check.sh --project "$BITBUCKET_REPO_SLUG" --scan . --format XML --format HTML --out dependency-check-report
+        artifacts:
+          - dependency-check-report/**
+
+    - step: &deploy-dev
+        name: Deploy to Development
+        runs-on: self.hosted
+        deployment: development
+        script:
+          # Deploy para ambiente de desenvolvimento
+          - echo "Deploying to Development environment..."
+          - echo "Application: $BITBUCKET_REPO_SLUG"
+          - echo "Version: $BITBUCKET_TAG"
+          
+          # Copiar arquivos para servidor de desenvolvimento
+          - rsync -avz --delete ./publish/ $DEV_SERVER_USER@$DEV_SERVER_HOST:$DEV_APP_PATH/
+          
+          # Reiniciar serviço
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "sudo systemctl restart $APP_SERVICE_NAME"
+          
+          # Verificar status do deploy
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "sudo systemctl status $APP_SERVICE_NAME"
+
+    - step: &deploy-homolog
+        name: Deploy to Homologation
+        runs-on: self.hosted
+        deployment: staging
+        trigger: manual
+        script:
+          # Deploy para ambiente de homologação
+          - echo "Deploying to Homologation environment..."
+          - echo "Application: $BITBUCKET_REPO_SLUG"
+          - echo "Version: $BITBUCKET_TAG"
+          
+          # Copiar arquivos para servidor de homologação
+          - rsync -avz --delete ./publish/ $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PATH/
+          
+          # Reiniciar serviço
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "sudo systemctl restart $APP_SERVICE_NAME"
+          
+          # Verificar status do deploy
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "sudo systemctl status $APP_SERVICE_NAME"
+
+    - step: &deploy-prod
+        name: Deploy to Production
+        runs-on: self.hosted
+        deployment: production
+        trigger: manual
+        script:
+          # Deploy para ambiente de produção
+          - echo "Deploying to Production environment..."
+          - echo "Application: $BITBUCKET_REPO_SLUG"
+          - echo "Version: $BITBUCKET_TAG"
+          
+          # Backup antes do deploy
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo cp -r $PROD_APP_PATH $PROD_APP_PATH.backup.$(date +%Y%m%d_%H%M%S)"
+          
+          # Copiar arquivos para servidor de produção
+          - rsync -avz --delete ./publish/ $PROD_SERVER_USER@$PROD_SERVER_HOST:$PROD_APP_PATH/
+          
+          # Reiniciar serviço
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl restart $APP_SERVICE_NAME"
+          
+          # Verificar status do deploy
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "sudo systemctl status $APP_SERVICE_NAME"
+          
+          # Health check
+          - sleep 30
+          - curl -f $PROD_APP_URL/health || (echo "Health check failed" && exit 1)
+
+pipelines:
+  branches:
+    develop:
+      - step: *build-dotnet
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-dev
+
+    homolog:
+      - step: *build-dotnet
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-homolog
+
+    master:
+      - step: *build-dotnet
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-prod
+
+  pull-requests:
+    '**':
+      - step: *build-dotnet
+      - step: *sonar-scan
+
+  tags:
+    'v*':
+      - step: *build-dotnet
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *deploy-prod

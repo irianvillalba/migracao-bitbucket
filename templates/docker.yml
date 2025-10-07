@@ -1,0 +1,197 @@
+# Template para Aplicações Docker - Bitbucket Pipelines
+
+image: docker:20.10.16
+
+options:
+  docker: true
+
+definitions:
+  services:
+    docker:
+      memory: 2048
+
+  steps:
+    - step: &build-docker
+        name: Build Docker Image
+        runs-on: self.hosted
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          # Build da imagem Docker
+          - echo "Building Docker image for $BITBUCKET_REPO_SLUG..."
+          - docker --version
+          
+          # Definir tag da imagem
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Build da imagem
+          - docker build -t $FULL_IMAGE_NAME .
+          - docker tag $FULL_IMAGE_NAME $IMAGE_NAME:latest
+          
+          # Scan de segurança da imagem
+          - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL $FULL_IMAGE_NAME
+        artifacts:
+          - docker-scan-report.json
+
+    - step: &push-harbor
+        name: Push to Harbor Registry
+        runs-on: self.hosted
+        services:
+          - docker
+        script:
+          # Login no Harbor
+          - echo $HARBOR_PASSWORD | docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME --password-stdin
+          
+          # Definir variáveis
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Push da imagem
+          - docker push $FULL_IMAGE_NAME
+          - docker push $IMAGE_NAME:latest
+          
+          echo "Image pushed: $FULL_IMAGE_NAME"
+
+    - step: &sonar-scan
+        name: SonarQube Analysis
+        runs-on: self.hosted
+        image: sonarsource/sonar-scanner-cli:latest
+        script:
+          # Executar análise SonarQube
+          - sonar-scanner -Dsonar.projectKey="$SONAR_PROJECT_KEY" -Dsonar.sources=. -Dsonar.host.url="$SONAR_HOST_URL" -Dsonar.login="$SONAR_TOKEN"
+
+    - step: &dependency-check
+        name: OWASP Dependency Check
+        runs-on: self.hosted
+        script:
+          # Download e execução do Dependency Check
+          - apt-get update && apt-get install -y wget unzip
+          - wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.0/dependency-check-8.4.0-release.zip
+          - unzip dependency-check-8.4.0-release.zip
+          - ./dependency-check/bin/dependency-check.sh --project "$BITBUCKET_REPO_SLUG" --scan . --format XML --format HTML --out dependency-check-report
+        artifacts:
+          - dependency-check-report/**
+
+    - step: &deploy-dev
+        name: Deploy to Development
+        runs-on: self.hosted
+        deployment: development
+        script:
+          # Deploy para ambiente de desenvolvimento
+          - echo "Deploying to Development environment..."
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Conectar ao servidor e fazer deploy
+          - ssh $DEV_SERVER_USER@$DEV_SERVER_HOST "
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME -p $DEV_APP_PORT:$APP_INTERNAL_PORT $FULL_IMAGE_NAME
+            "
+          
+          # Health check
+          - sleep 30
+          - curl -f http://$DEV_SERVER_HOST:$DEV_APP_PORT/health || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-homolog
+        name: Deploy to Homologation
+        runs-on: self.hosted
+        deployment: staging
+        trigger: manual
+        script:
+          # Deploy para ambiente de homologação
+          - echo "Deploying to Homologation environment..."
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Conectar ao servidor e fazer deploy
+          - ssh $HOMOLOG_SERVER_USER@$HOMOLOG_SERVER_HOST "
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME -p $HOMOLOG_APP_PORT:$APP_INTERNAL_PORT $FULL_IMAGE_NAME
+            "
+          
+          # Health check
+          - sleep 30
+          - curl -f http://$HOMOLOG_SERVER_HOST:$HOMOLOG_APP_PORT/health || (echo "Health check failed" && exit 1)
+
+    - step: &deploy-prod
+        name: Deploy to Production
+        runs-on: self.hosted
+        deployment: production
+        trigger: manual
+        script:
+          # Deploy para ambiente de produção
+          - echo "Deploying to Production environment..."
+          - export IMAGE_NAME="$HARBOR_REGISTRY/$BITBUCKET_REPO_SLUG"
+          - export IMAGE_TAG="${BITBUCKET_TAG:-${BITBUCKET_COMMIT:0:7}}"
+          - export FULL_IMAGE_NAME="$IMAGE_NAME:$IMAGE_TAG"
+          
+          # Backup da imagem atual
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              docker tag \$(docker inspect --format='{{.Image}}' $APP_CONTAINER_NAME) $IMAGE_NAME:backup-\$(date +%Y%m%d_%H%M%S) || true
+            "
+          
+          # Deploy da nova imagem
+          - ssh $PROD_SERVER_USER@$PROD_SERVER_HOST "
+              docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD &&
+              docker pull $FULL_IMAGE_NAME &&
+              docker stop $APP_CONTAINER_NAME || true &&
+              docker rm $APP_CONTAINER_NAME || true &&
+              docker run -d --name $APP_CONTAINER_NAME -p $PROD_APP_PORT:$APP_INTERNAL_PORT $FULL_IMAGE_NAME
+            "
+          
+          # Health check
+          - sleep 30
+          - curl -f http://$PROD_SERVER_HOST:$PROD_APP_PORT/health || (echo "Health check failed" && exit 1)
+
+pipelines:
+  branches:
+    develop:
+      - step: *build-docker
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *push-harbor
+      - step: *deploy-dev
+
+    homolog:
+      - step: *build-docker
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *push-harbor
+      - step: *deploy-homolog
+
+    master:
+      - step: *build-docker
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *push-harbor
+      - step: *deploy-prod
+
+  pull-requests:
+    '**':
+      - step: *build-docker
+      - step: *sonar-scan
+
+  tags:
+    'v*':
+      - step: *build-docker
+      - parallel:
+        - step: *sonar-scan
+        - step: *dependency-check
+      - step: *push-harbor
+      - step: *deploy-prod

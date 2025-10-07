@@ -1,0 +1,229 @@
+# Template para Deploy de Banco PostgreSQL - Bitbucket Pipelines
+
+image: postgres:13
+
+definitions:
+  steps:
+    - step: &database-deploy
+        name: Deploy Database Changes
+        runs-on: self.hosted
+        script:
+          # Instalar dependências
+          - apt-get update && apt-get install -y postgresql-client git curl
+          
+          # Configurar variáveis (adaptadas do script original)
+          - export repositorio=$BITBUCKET_GIT_SSH_ORIGIN
+          - export banco="${DB_NAME:-buzz}"
+          - export schema="${DB_SCHEMA:-assinatura}"
+          - export host_banco="${DB_HOST:-pgsql01.homolog.itamaraty.local}"
+          - export tag_version="${BITBUCKET_TAG:-0}"
+          - export build_user="${BITBUCKET_STEP_TRIGGERER_UUID:-system}"
+          
+          # Log de início
+          - echo "=== DATABASE DEPLOYMENT STARTED ==="
+          - echo "Repository: $repositorio"
+          - echo "Database: $banco"
+          - echo "Schema: $schema"
+          - echo "Host: $host_banco"
+          - echo "Tag: $tag_version"
+          - echo "User: $build_user"
+          - echo "Branch: $BITBUCKET_BRANCH"
+          - echo "Build: $BITBUCKET_BUILD_NUMBER"
+          
+          # Verificar se tag foi informada
+          - |
+            if [ "$tag_version" = "0" ]; then
+                echo " "
+                echo "Nenhuma versão de banco informada."
+                echo "Para executar deploy de banco, informe uma tag na build."
+                echo " "
+                exit 0
+            fi
+          
+          # Validar formato da tag (adaptado do script original)
+          - |
+            if [[ ! "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\-(alpha|beta|rc?)[0-9]+)?$ ]]; then
+                echo " "
+                echo "A tag $tag_version não está no formato válido."
+                echo "Informe uma tag no formato 1.0.0 ou 1.0.0-alpha1."
+                echo " "
+                echo "Favor verificar os padrões de versionamento em:"
+                echo "https://confluence.itamaraty.gov.br:8443/pages/viewpage.action?pageId=8454853"
+                echo " "
+                exit 1
+            fi
+          
+          # String de inserção de log (adaptada do script original)
+          - |
+            insert="
+            --Atualiza a versão atual do banco
+            INSERT INTO $schema.tb_log_versao (no_versao, ds_versao, ds_demanda, no_login)
+            VALUES ('$tag_version', '$BITBUCKET_REPO_SLUG (build $BITBUCKET_BUILD_NUMBER)', '$BITBUCKET_BRANCH', '$build_user');
+            "
+          
+          # Verificar conectividade com banco
+          - |
+            echo "Testando conectividade com banco de dados..."
+            if ! PGPASSWORD="$DB_PASSWORD" psql -h "$host_banco" -U "$DB_USER" -d "$banco" -c "SELECT 1;" > /dev/null 2>&1; then
+                echo " "
+                echo "Erro ao conectar ao banco de dados."
+                echo "Verifique as credenciais e conectividade."
+                echo " "
+                exit 1
+            fi
+            echo "Conectividade com banco OK."
+          
+          # Comparar versões (adaptado do script original)
+          - |
+            echo "Comparando versões..."
+            diff=$(PGPASSWORD="$DB_PASSWORD" psql --command "SELECT fn_comparar_versao('$schema','$tag_version')" --host="$host_banco" --username="$DB_USER" --dbname="$banco" --tuples-only --no-align --no-password)
+            if [ "$?" != "0" ]; then
+                echo " "
+                echo "Erro ao executar função de comparação de versão."
+                echo " "
+                exit 1
+            fi
+            echo "Resultado da comparação: $diff"
+          
+          # Recuperar versão atual do banco
+          - |
+            versao_banco=$(PGPASSWORD="$DB_PASSWORD" psql --command "select no_versao from $schema.vw_log_versao order by id_versao desc limit 1" --host="$host_banco" --username="$DB_USER" --dbname="$banco" --tuples-only --no-align)
+            echo "Versão atual do banco: $versao_banco"
+            echo "Versão da Build: $tag_version"
+          
+          # Executar atualização se necessário
+          - |
+            if [ "$diff" != "0" ]; then
+                echo " "
+                echo "Iniciando atualização do banco de dados..."
+                
+                # Clonar repositório na versão atual do banco
+                echo "Clonando repositório na versão $versao_banco..."
+                git clone -b "$versao_banco" "$repositorio" banco_atual
+                
+                if [ "$?" == "0" ]; then
+                    cd banco_atual
+                    
+                    # Checkout para branch atual e gerar diff
+                    git checkout "$BITBUCKET_BRANCH"
+                    echo "Gerando script de diferenças entre $versao_banco e $tag_version..."
+                    git diff "$versao_banco" "$tag_version" > ../database_changes.sql
+                    
+                    cd ..
+                    
+                    # Mostrar mudanças que serão aplicadas
+                    echo " "
+                    echo "=== MUDANÇAS QUE SERÃO APLICADAS ==="
+                    cat database_changes.sql
+                    echo "=== FIM DAS MUDANÇAS ==="
+                    echo " "
+                    
+                    # Aplicar mudanças + log
+                    echo "Aplicando mudanças no banco de dados..."
+                    {
+                        cat database_changes.sql
+                        echo "$insert"
+                    } | PGPASSWORD="$DB_PASSWORD" psql --host="$host_banco" --username="$DB_USER" --dbname="$banco"
+                    
+                    if [ "$?" == "0" ]; then
+                        echo " "
+                        echo "✅ Banco de dados atualizado com sucesso!"
+                        echo "Versão aplicada: $tag_version"
+                        echo " "
+                    else
+                        echo " "
+                        echo "❌ Erro ao atualizar banco de dados."
+                        echo " "
+                        exit 1
+                    fi
+                else
+                    echo " "
+                    echo "❌ Erro ao recuperar script da versão atual do banco."
+                    echo " "
+                    exit 1
+                fi
+            else
+                echo " "
+                echo "ℹ️  Operação não realizada."
+                echo "A versão atualmente implantada no banco ($versao_banco)"
+                echo "é a mesma informada na Build ($tag_version)."
+                echo " "
+            fi
+        artifacts:
+          - database_changes.sql
+
+    - step: &database-backup
+        name: Database Backup
+        runs-on: self.hosted
+        script:
+          # Criar backup antes do deploy
+          - apt-get update && apt-get install -y postgresql-client
+          - export banco="${DB_NAME:-buzz}"
+          - export host_banco="${DB_HOST:-pgsql01.homolog.itamaraty.local}"
+          - export backup_file="backup_${banco}_$(date +%Y%m%d_%H%M%S).sql"
+          
+          - echo "Criando backup do banco $banco..."
+          - PGPASSWORD="$DB_PASSWORD" pg_dump -h "$host_banco" -U "$DB_USER" -d "$banco" > "$backup_file"
+          
+          - echo "Backup criado: $backup_file"
+          - ls -lh "$backup_file"
+        artifacts:
+          - "backup_*.sql"
+
+    - step: &database-validate
+        name: Validate Database
+        runs-on: self.hosted
+        script:
+          # Validar estado do banco após deploy
+          - apt-get update && apt-get install -y postgresql-client
+          - export banco="${DB_NAME:-buzz}"
+          - export schema="${DB_SCHEMA:-assinatura}"
+          - export host_banco="${DB_HOST:-pgsql01.homolog.itamaraty.local}"
+          
+          - echo "Validando estado do banco após deploy..."
+          
+          # Verificar versão atual
+          - |
+            versao_atual=$(PGPASSWORD="$DB_PASSWORD" psql --command "select no_versao from $schema.vw_log_versao order by id_versao desc limit 1" --host="$host_banco" --username="$DB_USER" --dbname="$banco" --tuples-only --no-align)
+            echo "Versão atual no banco: $versao_atual"
+            echo "Versão esperada: ${BITBUCKET_TAG:-N/A}"
+          
+          # Verificar conectividade
+          - |
+            if PGPASSWORD="$DB_PASSWORD" psql -h "$host_banco" -U "$DB_USER" -d "$banco" -c "SELECT 1;" > /dev/null 2>&1; then
+                echo "✅ Conectividade com banco OK"
+            else
+                echo "❌ Erro de conectividade com banco"
+                exit 1
+            fi
+
+pipelines:
+  branches:
+    develop:
+      - step: *database-backup
+      - step: *database-deploy
+      - step: *database-validate
+
+    homolog:
+      - step: *database-backup
+      - step: *database-deploy
+      - step: *database-validate
+
+    master:
+      - step:
+          <<: *database-backup
+          trigger: manual
+      - step:
+          <<: *database-deploy
+          trigger: manual
+      - step: *database-validate
+
+  tags:
+    'v*':
+      - step:
+          <<: *database-backup
+          trigger: manual
+      - step:
+          <<: *database-deploy
+          trigger: manual
+      - step: *database-validate
